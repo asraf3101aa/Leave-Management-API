@@ -1,0 +1,1042 @@
+openapi: 3.1.0
+info:
+  title: Leave Management API
+  description: |
+    Multi-tenant Leave Management system built with Clean Architecture.
+
+    ## Authentication
+    All protected endpoints use **cookie-based JWT**.
+    Call `POST /api/auth/login` to receive `AccessToken` and `RefreshToken` cookies.
+    These are automatically sent on subsequent requests.
+
+    ## Tenant Context
+    Pass `X-Tenant-Id` header (UUID) on all tenant-scoped requests
+    (leave requests, leave types, roles).
+
+    ## Pagination
+    List endpoints accept `?page=1&pageSize=10` and return a paginated envelope:
+    ```json
+    {
+      "success": true,
+      "data": {
+        "items": [...],
+        "meta": {
+          "totalItems": 100,
+          "itemCount": 10,
+          "itemsPerPage": 10,
+          "totalPages": 10,
+          "currentPage": 1
+        }
+      }
+    }
+    ```
+
+    ## Leave Request Lifecycle
+    ```
+    Pending ──[submit]──► InReview ──[approve]──► Approved
+                │                    └──[reject]──► Rejected
+                └──────────────────[reject]──────► Rejected
+    ```
+  version: 1.0.0
+  contact:
+    name: Leave Management API
+
+servers:
+  - url: http://localhost:5000
+    description: Local Development
+
+tags:
+  - name: Auth
+    description: Authentication, registration, user management
+  - name: Leave Requests
+    description: CRUD and lifecycle for employee leave requests
+  - name: Leave Types
+    description: Manage leave type definitions
+  - name: Roles
+    description: RBAC - role and permission management
+
+# ─── Reusable Components ────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: AccessToken
+
+  parameters:
+    TenantId:
+      name: X-Tenant-Id
+      in: header
+      required: false
+      schema:
+        type: string
+        format: uuid
+      description: Tenant context for the request
+
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+        minimum: 1
+
+    PageSize:
+      name: pageSize
+      in: query
+      schema:
+        type: integer
+        default: 10
+        minimum: 1
+        maximum: 100
+
+  schemas:
+    # Generic Responses
+    ApiResponseSuccess:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+        data:
+          type: object
+
+    ApiResponseError:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        message:
+          type: string
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  message:
+                    type: string
+
+    PaginationMeta:
+      type: object
+      properties:
+        totalItems:
+          type: integer
+        itemCount:
+          type: integer
+        itemsPerPage:
+          type: integer
+        totalPages:
+          type: integer
+        currentPage:
+          type: integer
+
+    # Enums
+    LeaveStatus:
+      type: string
+      enum: [Pending, InReview, Approved, Rejected]
+      description: |
+        - `Pending` (1) — freshly created, awaiting submission
+        - `InReview` (2) — submitted for manager review
+        - `Approved` (3) — approved by manager/HR
+        - `Rejected` (4) — rejected
+
+    LeaveDuration:
+      type: string
+      enum: [FullDay, HalfDay]
+      description: |
+        - `FullDay` (1)
+        - `HalfDay` (2)
+
+    # Auth
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: admin@leaveflow.com
+        password:
+          type: string
+          format: password
+          example: SuperAdmin123!
+
+    InviteUserRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          nullable: true
+          example: Employee
+
+    AcceptInvitationRequest:
+      type: object
+      required: [token, password, firstName, lastName]
+      properties:
+        token:
+          type: string
+        password:
+          type: string
+          format: password
+        firstName:
+          type: string
+        lastName:
+          type: string
+
+    MeResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        firstName:
+          type: string
+        lastName:
+          type: string
+        roles:
+          type: array
+          items:
+            type: string
+        permissions:
+          type: array
+          items:
+            type: string
+        tenantId:
+          type: string
+          format: uuid
+          nullable: true
+
+    UserTenantDto:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        isActive:
+          type: boolean
+
+    # Leave Requests
+    CreateLeaveRequestRequest:
+      type: object
+      required: [startDate, endDate, leaveTypeId, duration]
+      properties:
+        startDate:
+          type: string
+          format: date-time
+          example: "2025-04-01T00:00:00Z"
+        endDate:
+          type: string
+          format: date-time
+          example: "2025-04-05T00:00:00Z"
+        leaveTypeId:
+          type: string
+          format: uuid
+        requestComments:
+          type: string
+          example: Family vacation
+        duration:
+          $ref: '#/components/schemas/LeaveDuration'
+
+    UpdateLeaveRequestRequest:
+      type: object
+      required: [startDate, endDate, leaveTypeId, duration]
+      properties:
+        startDate:
+          type: string
+          format: date-time
+        endDate:
+          type: string
+          format: date-time
+        leaveTypeId:
+          type: string
+          format: uuid
+        requestComments:
+          type: string
+        duration:
+          $ref: '#/components/schemas/LeaveDuration'
+
+    LeaveRequestListDto:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        startDate:
+          type: string
+          format: date-time
+        endDate:
+          type: string
+          format: date-time
+        leaveTypeId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/LeaveStatus'
+        duration:
+          $ref: '#/components/schemas/LeaveDuration'
+        createdBy:
+          type: string
+          format: uuid
+
+    LeaveRequestDto:
+      allOf:
+        - $ref: '#/components/schemas/LeaveRequestListDto'
+        - type: object
+          properties:
+            createdAt:
+              type: string
+              format: date-time
+            requestComments:
+              type: string
+            approvedBy:
+              type: string
+              format: uuid
+              nullable: true
+            reviewedBy:
+              type: string
+              format: uuid
+              nullable: true
+            approvedAt:
+              type: string
+              format: date-time
+              nullable: true
+            reviewedAt:
+              type: string
+              format: date-time
+              nullable: true
+
+    # Leave Types
+    CreateLeaveTypeRequest:
+      type: object
+      required: [name, defaultDays]
+      properties:
+        name:
+          type: string
+          example: Annual Leave
+        defaultDays:
+          type: integer
+          example: 20
+
+    UpdateLeaveTypeRequest:
+      type: object
+      required: [name, defaultDays, isActive]
+      properties:
+        name:
+          type: string
+        defaultDays:
+          type: integer
+        isActive:
+          type: boolean
+
+    LeaveTypeDto:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        defaultDays:
+          type: integer
+        isActive:
+          type: boolean
+
+    # Roles
+    CreateRoleRequest:
+      type: object
+      required: [roleName]
+      properties:
+        roleName:
+          type: string
+          example: Manager
+        tenantId:
+          type: string
+          format: uuid
+          nullable: true
+          description: SuperAdmin only — target tenant. Omit to use current tenant.
+
+security:
+  - cookieAuth: []
+
+# ─── Paths ───────────────────────────────────────────────────────────────────
+paths:
+
+  # ── Auth ───────────────────────────────────────────────────────────────────
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Login
+      description: Authenticates the user and sets `AccessToken` + `RefreshToken` HttpOnly cookies.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login successful
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: AccessToken=<jwt>; HttpOnly; Secure; SameSite=Strict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseSuccess'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Logout
+      description: Clears `AccessToken` and `RefreshToken` cookies.
+      responses:
+        '200':
+          description: Logout successful
+        '401':
+          description: Unauthorized
+
+  /api/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh access token
+      description: Uses the `RefreshToken` cookie to issue a new `AccessToken`.
+      security: []
+      responses:
+        '200':
+          description: Token refreshed — new cookies set
+        '401':
+          description: Invalid or expired refresh token
+
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      summary: Get current user profile
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Current user info with roles and permissions
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponseSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/MeResponse'
+        '404':
+          description: User not found
+
+  /api/auth/my-tenants:
+    get:
+      tags: [Auth]
+      summary: List tenants the current user belongs to
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Paginated list of tenants
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/UserTenantDto'
+                      meta:
+                        $ref: '#/components/schemas/PaginationMeta'
+
+  /api/auth/invite-user:
+    post:
+      tags: [Auth]
+      summary: Invite a user to the current tenant
+      description: |
+        **Required permission:** `Permissions.Users.Create`
+        Sends an invitation email with a token.
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InviteUserRequest'
+      responses:
+        '200':
+          description: Invitation sent
+        '400':
+          description: Failed to create invitation
+
+  /api/auth/accept-invitation:
+    post:
+      tags: [Auth]
+      summary: Accept a tenant invitation and register
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcceptInvitationRequest'
+      responses:
+        '200':
+          description: Account created; user added to tenant
+        '400':
+          description: Invalid or expired token
+
+  /api/auth/users/{userId}/toggle-active:
+    patch:
+      tags: [Auth]
+      summary: Toggle user active status
+      description: |
+        **Required permission:** `Permissions.Users.Edit`
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Active status toggled
+        '403':
+          description: Unauthorized
+
+  /api/auth/users/{userId}:
+    delete:
+      tags: [Auth]
+      summary: Soft-delete a user
+      description: |
+        **Required permission:** `Permissions.Users.Delete`
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: User deleted
+        '403':
+          description: Unauthorized
+
+  # ── Leave Requests ─────────────────────────────────────────────────────────
+  /api/leaverequests:
+    get:
+      tags: [Leave Requests]
+      summary: List leave requests (paginated)
+      description: |
+        **Required permission:** `Permissions.LeaveRequests.View`
+        Results are ordered by creation date descending.
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Paginated list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/LeaveRequestListDto'
+                      meta:
+                        $ref: '#/components/schemas/PaginationMeta'
+
+    post:
+      tags: [Leave Requests]
+      summary: Create a leave request
+      description: |
+        **Required permission:** `Permissions.LeaveRequests.Create`
+        The request is created in **Pending** status.
+        `createdBy` is automatically set to the authenticated user.
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLeaveRequestRequest'
+      responses:
+        '201':
+          description: Leave request created — returns new ID
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponseSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: string
+                        format: uuid
+        '422':
+          description: Validation error
+
+  /api/leaverequests/{id}:
+    get:
+      tags: [Leave Requests]
+      summary: Get leave request details
+      description: |
+        **Required permission:** `Permissions.LeaveRequests.View`
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Leave request details
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponseSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/LeaveRequestDto'
+        '404':
+          description: Not found
+
+    put:
+      tags: [Leave Requests]
+      summary: Edit a leave request (creator only, Pending status only)
+      description: |
+        **Required permission:** `Permissions.LeaveRequests.Edit`
+        Only the creator can edit, and only while status is **Pending**.
+        Returns `400` if the request is not in Pending state.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateLeaveRequestRequest'
+      responses:
+        '200':
+          description: Updated successfully
+        '400':
+          description: Request is not in Pending status
+        '404':
+          description: Not found
+
+    delete:
+      tags: [Leave Requests]
+      summary: Delete a leave request
+      description: |
+        **Required permission:** `Permissions.LeaveRequests.Delete`
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Deleted successfully
+        '404':
+          description: Not found
+
+  /api/leaverequests/{id}/submit:
+    patch:
+      tags: [Leave Requests]
+      summary: Submit for review (Pending → InReview)
+      description: |
+        **Required permission:** `Permissions.LeaveRequests.Edit`
+        The employee submits their pending request to the reviewer queue.
+        Only works when status is **Pending**.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Submitted for review
+        '400':
+          description: Request is not in Pending status
+
+  /api/leaverequests/{id}/approve:
+    patch:
+      tags: [Leave Requests]
+      summary: Approve a leave request (InReview → Approved)
+      description: |
+        **Required permission:** `Permissions.LeaveRequests.Approve`
+        Manager/HR approves an in-review request.
+        Only works when status is **InReview**.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Approved
+        '400':
+          description: Request is not in InReview status
+
+  /api/leaverequests/{id}/reject:
+    patch:
+      tags: [Leave Requests]
+      summary: Reject a leave request (Pending/InReview → Rejected)
+      description: |
+        **Required permission:** `Permissions.LeaveRequests.Approve`
+        Manager/HR rejects the request.
+        Works when status is **Pending** or **InReview**.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Rejected
+        '400':
+          description: Request cannot be rejected in its current state
+
+  # ── Leave Types ────────────────────────────────────────────────────────────
+  /api/leavetypes:
+    get:
+      tags: [Leave Types]
+      summary: List leave types (paginated)
+      description: |
+        **Required permission:** `Permissions.LeaveTypes.View`
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: includeInactive
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Paginated list of leave types
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/LeaveTypeDto'
+                      meta:
+                        $ref: '#/components/schemas/PaginationMeta'
+
+    post:
+      tags: [Leave Types]
+      summary: Create a leave type
+      description: |
+        **Required permission:** `Permissions.LeaveTypes.Create`
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLeaveTypeRequest'
+      responses:
+        '201':
+          description: Created — returns new ID
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponseSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: string
+                        format: uuid
+
+  /api/leavetypes/{id}:
+    get:
+      tags: [Leave Types]
+      summary: Get leave type by ID
+      description: |
+        **Required permission:** `Permissions.LeaveTypes.View`
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Leave type details
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponseSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/LeaveTypeDto'
+        '404':
+          description: Not found
+
+    put:
+      tags: [Leave Types]
+      summary: Update a leave type
+      description: |
+        **Required permission:** `Permissions.LeaveTypes.Edit`
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateLeaveTypeRequest'
+      responses:
+        '200':
+          description: Updated
+        '404':
+          description: Not found
+
+    delete:
+      tags: [Leave Types]
+      summary: Soft-delete a leave type
+      description: |
+        **Required permission:** `Permissions.LeaveTypes.Delete`
+        Performs a soft delete (sets `IsDeleted = true`).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Deleted
+        '404':
+          description: Not found
+
+  # ── Roles ──────────────────────────────────────────────────────────────────
+  /api/roles:
+    get:
+      tags: [Roles]
+      summary: List roles for a tenant
+      description: |
+        **Required permission:** `Permissions.Roles.View`
+        SuperAdmin can pass any `tenantId` via query param.
+        Other users see roles for their current tenant.
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - name: tenantId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: SuperAdmin only — filter by specific tenant
+      responses:
+        '200':
+          description: List of role names
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponseSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: string
+                        example: ["Manager", "Employee", "HR"]
+
+    post:
+      tags: [Roles]
+      summary: Create a role
+      description: |
+        **Required permission:** `Permissions.Roles.Create`
+        SuperAdmin can specify `tenantId` to target another tenant.
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRoleRequest'
+      responses:
+        '200':
+          description: Role created
+        '400':
+          description: Role already exists or creation failed
+
+  /api/roles/set-default:
+    post:
+      tags: [Roles]
+      summary: Set the default role for the current tenant
+      description: |
+        **Required permission:** `Permissions.Roles.Edit`
+        New users invited to this tenant will be assigned this role.
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: string
+              example: Employee
+      responses:
+        '200':
+          description: Default role updated
+        '400':
+          description: Failed
+
+  /api/roles/{roleName}/permissions:
+    post:
+      tags: [Roles]
+      summary: Upsert permissions for a role
+      description: |
+        **Required permission:** `Permissions.Roles.Edit`
+        Replaces the complete permission set for the role.
+        Removed permissions are soft-deleted.
+
+        ### Available Permissions
+        | Resource | Permissions |
+        |----------|------------|
+        | LeaveRequests | View, Create, Edit, Delete, Approve |
+        | LeaveTypes | View, Create, Edit, Delete |
+        | Roles | View, Create, Edit, Delete |
+        | Users | View, Create, Edit, Delete |
+      parameters:
+        - name: roleName
+          in: path
+          required: true
+          schema:
+            type: string
+            example: Manager
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+              example:
+                - Permissions.LeaveRequests.View
+                - Permissions.LeaveRequests.Approve
+                - Permissions.LeaveTypes.View
+      responses:
+        '200':
+          description: Permissions updated
+        '400':
+          description: Role not found or update failed
+
+  /api/roles/{roleName}:
+    delete:
+      tags: [Roles]
+      summary: Soft-delete a role
+      description: |
+        **Required permission:** `Permissions.Roles.Delete`
+      parameters:
+        - name: roleName
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Role deleted
+        '400':
+          description: Failed
