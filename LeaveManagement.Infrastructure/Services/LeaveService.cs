@@ -10,7 +10,7 @@ namespace LeaveManagement.Infrastructure.Services;
 
 public class LeaveService(IApplicationDbContext context) : ILeaveService
 {
-    // ─── Leave Requests ───────────────────────────────────────────────────────
+    //   Leave Requests ───────────────────────────────────────────────────────
 
     public async Task<Guid> CreateLeaveRequest(DateTime startDate, DateTime endDate, Guid leaveTypeId, string comments, LeaveDuration duration, Guid createdBy, CancellationToken ct = default)
     {
