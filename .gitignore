@@ -6,6 +6,10 @@
 # dotenv files
 .env
 
+# ASP.NET Core secrets
+**/appsettings.json
+**/appsettings.Development.json
+
 # User-specific files
 *.rsuser
 *.suo
@@ -480,3 +484,5 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+.vscode

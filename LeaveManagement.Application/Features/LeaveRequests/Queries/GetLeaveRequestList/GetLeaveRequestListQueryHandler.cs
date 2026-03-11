@@ -1,25 +1,15 @@
 using MediatR;
 using LeaveManagement.Application.DTOs.LeaveRequest;
 using LeaveManagement.Application.Interfaces;
-using Microsoft.EntityFrameworkCore;
+using LeaveManagement.Application.Responses;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace LeaveManagement.Application.Features.LeaveRequests.Queries.GetLeaveRequestList;
 
-public class GetLeaveRequestListQueryHandler(IApplicationDbContext context)
-    : IRequestHandler<GetLeaveRequestListQuery, List<LeaveRequestListDto>>
+public class GetLeaveRequestListQueryHandler(ILeaveService leaveService)
+    : IRequestHandler<GetLeaveRequestListQuery, PaginatedData<LeaveRequestListDto>>
 {
-    public async Task<List<LeaveRequestListDto>> Handle(GetLeaveRequestListQuery request, CancellationToken cancellationToken)
-    {
-        return await context.LeaveRequests
-            .Select(lr => new LeaveRequestListDto(
-                lr.Id,
-                lr.RequestingEmployeeId,
-                lr.StartDate,
-                lr.EndDate,
-                lr.LeaveTypeId,
-                lr.Status,
-                lr.Duration
-            ))
-            .ToListAsync(cancellationToken);
-    }
+    public async Task<PaginatedData<LeaveRequestListDto>> Handle(GetLeaveRequestListQuery request, CancellationToken cancellationToken) =>
+        await leaveService.GetLeaveRequests(request.Page, request.PageSize, cancellationToken);
 }

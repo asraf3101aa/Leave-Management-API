@@ -3,16 +3,16 @@ namespace LeaveManagement.Application.DTOs.LeaveRequest;
 
 public record LeaveRequestDto(
     Guid Id,
-    string RequestingEmployeeId,
     DateTime StartDate,
     DateTime EndDate,
-    int LeaveTypeId,
-    DateTime DateRequested,
+    Guid LeaveTypeId,
+    DateTime CreatedAt,
+    Guid CreatedBy,
     string RequestComments,
     LeaveStatus Status,
-    bool Cancelled,
     LeaveDuration Duration,
-    string? ApprovedBy,
-    string? UpdatedBy,
-    DateTime? UpdatedAt
+    Guid? ApprovedBy,
+    Guid? ReviewedBy,
+    DateTime? ApprovedAt,
+    DateTime? ReviewedAt
 );

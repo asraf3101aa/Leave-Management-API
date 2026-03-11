@@ -1,8 +1,9 @@
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
-using LeaveManagement.Domain.Models;
+using LeaveManagement.Infrastructure.Identity;
 using LeaveManagement.Domain.Entities;
 using Microsoft.AspNetCore.Identity;
+using LeaveManagement.Application.Interfaces;
 
 namespace LeaveManagement.Infrastructure.Persistence;
 
@@ -10,15 +11,14 @@ public class MasterDbContext(DbContextOptions<MasterDbContext> options)
     : IdentityDbContext<
         ApplicationUser,
         ApplicationRole,
-        string,
-        IdentityUserClaim<string>,
+        Guid,
+        IdentityUserClaim<Guid>,
         TenantUserRole,
-        IdentityUserLogin<string>,
+        IdentityUserLogin<Guid>,
         ApplicationRoleClaim,
-        IdentityUserToken<string>>(options)
+        IdentityUserToken<Guid>>(options), IMasterDbContext
 {
     public DbSet<Tenant> Tenants { get; set; } = null!;
-    public DbSet<TenantHistory> TenantHistories { get; set; } = null!;
     public DbSet<TenantInvitation> TenantInvitations { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder builder)
@@ -30,12 +30,28 @@ public class MasterDbContext(DbContextOptions<MasterDbContext> options)
         {
             b.HasKey(t => t.Id);
             b.HasQueryFilter(e => !e.IsDeleted && e.IsActive);
+
+            b.HasOne<ApplicationUser>()
+                .WithMany()
+                .HasForeignKey(t => t.CreatedBy)
+                .IsRequired();
+
+            b.HasOne<ApplicationUser>()
+                .WithMany()
+                .HasForeignKey(t => t.UpdatedBy);
         });
+
+
 
         builder.Entity<TenantInvitation>(b =>
         {
             b.HasIndex(i => i.Token).IsUnique();
             b.HasIndex(i => i.Email);
+
+            b.HasOne<ApplicationUser>()
+                .WithMany()
+                .HasForeignKey(i => i.CreatedBy)
+                .IsRequired();
         });
 
         // Identity Configuration (Modified for Master DB / RBAC)
@@ -44,6 +60,10 @@ public class MasterDbContext(DbContextOptions<MasterDbContext> options)
             b.ToTable("AspNetUserRoles");
             b.HasKey(ur => new { ur.UserId, ur.RoleId, ur.TenantId });
             b.HasQueryFilter(ur => !ur.IsDeleted);
+
+            b.HasOne<ApplicationUser>()
+                .WithMany()
+                .HasForeignKey(ur => ur.CreatedBy);
         });
 
         builder.Entity<ApplicationRole>(b =>
@@ -51,6 +71,14 @@ public class MasterDbContext(DbContextOptions<MasterDbContext> options)
             b.HasIndex(r => new { r.Name, r.TenantId })
                 .IsUnique();
             b.HasQueryFilter(r => !r.IsDeleted);
+
+            b.HasOne<ApplicationUser>()
+                .WithMany()
+                .HasForeignKey(r => r.CreatedBy);
+
+            b.HasOne<ApplicationUser>()
+                .WithMany()
+                .HasForeignKey(r => r.UpdatedBy);
         });
 
         builder.Entity<ApplicationRoleClaim>(b =>

@@ -19,18 +19,17 @@ public enum LeaveStatus
 public class LeaveRequest
 {
     public Guid Id { get; set; }
-    public string RequestingEmployeeId { get; set; } = string.Empty;
     public DateTime StartDate { get; set; }
     public DateTime EndDate { get; set; }
-    public int LeaveTypeId { get; set; }
-    public DateTime DateRequested { get; set; }
+    public Guid LeaveTypeId { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public Guid CreatedBy { get; set; }
     public string RequestComments { get; set; } = string.Empty;
     public LeaveStatus Status { get; set; } = LeaveStatus.Pending;
-    public bool Cancelled { get; set; }
     public LeaveDuration Duration { get; set; } = LeaveDuration.FullDay;
 
-    // Tracking/Audit
-    public string? ApprovedBy { get; set; }
-    public string? UpdatedBy { get; set; }
-    public DateTime? UpdatedAt { get; set; }
+    public Guid? ApprovedBy { get; set; }
+    public Guid? ReviewedBy { get; set; }
+    public DateTime? ApprovedAt { get; set; }
+    public DateTime? ReviewedAt { get; set; }
 }

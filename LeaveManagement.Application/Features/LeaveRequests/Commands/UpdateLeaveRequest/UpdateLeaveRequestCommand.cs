@@ -7,10 +7,8 @@ public record UpdateLeaveRequestCommand(
     Guid Id,
     DateTime StartDate,
     DateTime EndDate,
-    int LeaveTypeId,
+    Guid LeaveTypeId,
     string RequestComments,
-    LeaveStatus Status,
-    bool Cancelled,
     LeaveDuration Duration,
-    string UpdatedBy
+    Guid UpdatedBy
 ) : IRequest;

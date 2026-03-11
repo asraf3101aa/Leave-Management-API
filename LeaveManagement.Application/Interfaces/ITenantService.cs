@@ -3,7 +3,7 @@ namespace LeaveManagement.Application.Interfaces
 {
     public interface ITenantService
     {
-        string? GetTenantId();
+        Guid? GetTenantId();
         string? GetConnectionString();
     }
 }

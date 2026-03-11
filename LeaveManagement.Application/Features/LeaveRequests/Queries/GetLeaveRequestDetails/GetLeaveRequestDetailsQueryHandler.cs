@@ -1,34 +1,14 @@
 using MediatR;
 using LeaveManagement.Application.DTOs.LeaveRequest;
 using LeaveManagement.Application.Interfaces;
-using Microsoft.EntityFrameworkCore;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace LeaveManagement.Application.Features.LeaveRequests.Queries.GetLeaveRequestDetails;
 
-public class GetLeaveRequestDetailsQueryHandler(IApplicationDbContext context)
+public class GetLeaveRequestDetailsQueryHandler(ILeaveService leaveService)
     : IRequestHandler<GetLeaveRequestDetailsQuery, LeaveRequestDto?>
 {
-    public async Task<LeaveRequestDto?> Handle(GetLeaveRequestDetailsQuery request, CancellationToken cancellationToken)
-    {
-        var lr = await context.LeaveRequests
-            .FirstOrDefaultAsync(q => q.Id == request.Id, cancellationToken);
-
-        if (lr == null) return null;
-
-        return new LeaveRequestDto(
-            lr.Id,
-            lr.RequestingEmployeeId,
-            lr.StartDate,
-            lr.EndDate,
-            lr.LeaveTypeId,
-            lr.DateRequested,
-            lr.RequestComments,
-            lr.Status,
-            lr.Cancelled,
-            lr.Duration,
-            lr.ApprovedBy,
-            lr.UpdatedBy,
-            lr.UpdatedAt
-        );
-    }
+    public async Task<LeaveRequestDto?> Handle(GetLeaveRequestDetailsQuery request, CancellationToken cancellationToken) =>
+        await leaveService.GetLeaveRequest(request.Id, cancellationToken);
 }

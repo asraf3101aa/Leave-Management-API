@@ -11,12 +11,12 @@ public class CreateLeaveRequestCommandValidator : AbstractValidator<CreateLeaveR
             .LessThan(p => p.EndDate).WithMessage("{PropertyName} must be before {ComparisonValue}");
 
         RuleFor(p => p.LeaveTypeId)
-            .GreaterThan(0).WithMessage("{PropertyName} must be greater than zero");
+            .NotEmpty().WithMessage("{PropertyName} is required");
 
         RuleFor(p => p.Duration)
             .IsInEnum().WithMessage("Invalid {PropertyName}");
 
-        RuleFor(p => p.RequestingEmployeeId)
+        RuleFor(p => p.CreatedBy)
             .NotEmpty().WithMessage("{PropertyName} is required");
     }
 }

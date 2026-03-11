@@ -3,10 +3,10 @@ namespace LeaveManagement.Application.DTOs.LeaveRequest;
 
 public record LeaveRequestListDto(
     Guid Id,
-    string RequestingEmployeeId,
     DateTime StartDate,
     DateTime EndDate,
-    int LeaveTypeId,
+    Guid LeaveTypeId,
     LeaveStatus Status,
-    LeaveDuration Duration
+    LeaveDuration Duration,
+    Guid CreatedBy
 );

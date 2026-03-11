@@ -4,10 +4,10 @@ using LeaveManagement.Domain.Entities;
 namespace LeaveManagement.Application.Features.LeaveRequests.Commands.CreateLeaveRequest;
 
 public record CreateLeaveRequestCommand(
-    string RequestingEmployeeId,
     DateTime StartDate,
     DateTime EndDate,
-    int LeaveTypeId,
+    Guid LeaveTypeId,
     string RequestComments,
+    Guid CreatedBy,
     LeaveDuration Duration = LeaveDuration.FullDay
 ) : IRequest<Guid>;

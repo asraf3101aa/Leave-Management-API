@@ -1,13 +1,12 @@
 using Microsoft.AspNetCore.Identity;
-using LeaveManagement.Domain.Models;
+using LeaveManagement.Infrastructure.Identity;
+using LeaveManagement.Application.Models.Email;
+
 using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
-using System.Collections.Generic;
 using System.Security.Claims;
 using System.IdentityModel.Tokens.Jwt;
-using System.Linq;
-using LeaveManagement.Infrastructure.Identity;
 using LeaveManagement.Application.Interfaces;
 using LeaveManagement.Domain.Entities;
 using LeaveManagement.Infrastructure.Persistence;
@@ -15,70 +14,54 @@ using Microsoft.EntityFrameworkCore;
 
 namespace LeaveManagement.Infrastructure.Services;
 
-public interface IAuthService
-{
-    Task<string> Login(string email, string password, string? tenantId = null);
-    Task<bool> Register(ApplicationUser user, string password, string? roleName = null, string? tenantId = null, string? changedBy = null);
-    Task<bool> AssignRoleToUserAsync(string userId, string roleName, string? tenantId, string changedBy);
-    Task<bool> CreateRole(string roleName, string? tenantId, string changedBy);
-    Task<IEnumerable<string>> GetRolesByTenant(string? tenantId);
-    Task<bool> SoftDeleteUser(string userId);
-    Task<bool> SoftDeleteRole(string roleName, string? tenantId, string changedBy);
-    Task<bool> ToggleUserActive(string userId);
-    Task<bool> CreateInvitation(string email, string tenantId, string roleName, string createdBy);
-    Task<TenantInvitation?> GetInvitationByToken(string token);
-    Task<bool> AcceptInvitation(string token, string password, string firstName, string lastName);
-    Task<bool> SetDefaultRole(string tenantId, string roleName, string changedBy);
-    Task<bool> UpsertRolePermissions(string roleName, string? tenantId, List<string> permissions, string changedBy);
-    Task<List<string>> GetPermissionsByRole(string roleName, string? tenantId);
-}
-
 public class AuthService(
     UserManager<ApplicationUser> userManager,
     SignInManager<ApplicationUser> signInManager,
     RoleManager<ApplicationRole> roleManager,
     MasterDbContext masterContext,
-    IApplicationDbContext tenantContext,
-    IConfiguration configuration) : IAuthService
+    IConfiguration configuration,
+    IEmailQueuePublisher emailQueuePublisher) : IAuthService
 {
-    public async Task<string> Login(string email, string password, string? tenantId = null)
+    public async Task<AuthResponse?> Login(string email, string password)
     {
         var user = await userManager.FindByEmailAsync(email);
-        if (user == null || user.IsDeleted || !user.IsActive) return string.Empty;
-
-        if (!string.IsNullOrEmpty(tenantId))
-        {
-            var tenant = await masterContext.Tenants.IgnoreQueryFilters().FirstOrDefaultAsync(t => t.Id == tenantId);
-            if (tenant == null || !tenant.IsActive || tenant.IsDeleted) return string.Empty;
-        }
+        if (user == null || user.IsDeleted || !user.IsActive) return null;
 
         var result = await signInManager.CheckPasswordSignInAsync(user, password, false);
-        if (!result.Succeeded) return string.Empty;
+        if (!result.Succeeded) return null;
 
-        return await GenerateToken(user, tenantId);
+        return await GenerateAuthResponse(user);
     }
 
-    public async Task<bool> Register(ApplicationUser user, string password, string? roleName = null, string? tenantId = null, string? changedBy = null)
+    public async Task<bool> Register(string email, string password, string firstName, string lastName, string? roleName = null, Guid? tenantId = null, Guid? changedBy = null)
     {
+        var user = new ApplicationUser
+        {
+            UserName = email,
+            Email = email,
+            FirstName = firstName,
+            LastName = lastName
+        };
+
         var result = await userManager.CreateAsync(user, password);
         if (!result.Succeeded) return false;
 
         string? finalRole = roleName;
-        if (string.IsNullOrEmpty(finalRole) && !string.IsNullOrEmpty(tenantId))
+        if (string.IsNullOrEmpty(finalRole) && tenantId.HasValue)
         {
-            var tenant = await masterContext.Tenants.IgnoreQueryFilters().FirstOrDefaultAsync(t => t.Id == tenantId);
+            var tenant = await masterContext.Tenants.IgnoreQueryFilters().FirstOrDefaultAsync(t => t.Id == tenantId.Value);
             finalRole = tenant?.DefaultRoleName;
         }
 
         if (!string.IsNullOrEmpty(finalRole))
         {
-            await AssignRoleToUserAsync(user.Id, finalRole, tenantId, changedBy ?? "System");
+            await AssignRoleToUserAsync(user.Id, finalRole, tenantId, changedBy ?? Guid.Empty);
         }
 
         return true;
     }
 
-    public async Task<bool> SetDefaultRole(string tenantId, string roleName, string changedBy)
+    public async Task<bool> SetDefaultRole(Guid tenantId, string roleName, Guid changedBy)
     {
         var tenant = await masterContext.Tenants.IgnoreQueryFilters().FirstOrDefaultAsync(t => t.Id == tenantId);
         if (tenant == null) return false;
@@ -87,18 +70,10 @@ public class AuthService(
         tenant.UpdatedBy = changedBy;
         tenant.UpdatedAt = DateTime.UtcNow;
 
-        masterContext.TenantHistories.Add(new TenantHistory
-        {
-            TenantId = tenantId,
-            Action = "DefaultRoleChanged",
-            Details = $"Default role for tenant changed to {roleName}",
-            ChangedBy = changedBy
-        });
-
         return await masterContext.SaveChangesAsync() > 0;
     }
 
-    public async Task<bool> UpsertRolePermissions(string roleName, string? tenantId, List<string> permissions, string changedBy)
+    public async Task<bool> UpsertRolePermissions(string roleName, Guid? tenantId, List<string> permissions, Guid changedBy)
     {
         var role = await roleManager.Roles.FirstOrDefaultAsync(r => r.Name == roleName && r.TenantId == tenantId);
         if (role == null) return false;
@@ -137,23 +112,12 @@ public class AuthService(
             }
         }
 
-        if (!string.IsNullOrEmpty(tenantId))
-        {
-            tenantContext.RoleHistories.Add(new RoleHistory
-            {
-                Action = "RolePermissionsUpdated",
-                EntityId = role.Id,
-                EntityName = roleName,
-                ChangedBy = changedBy,
-                Details = $"Updated permissions for role {roleName}"
-            });
-            await tenantContext.SaveChangesAsync();
-        }
+
 
         return await masterContext.SaveChangesAsync() > 0;
     }
 
-    public async Task<List<string>> GetPermissionsByRole(string roleName, string? tenantId)
+    public async Task<List<string>> GetPermissionsByRole(string roleName, Guid? tenantId)
     {
         var role = await roleManager.Roles.FirstOrDefaultAsync(r => r.Name == roleName && r.TenantId == tenantId);
         if (role == null) return new List<string>();
@@ -164,7 +128,7 @@ public class AuthService(
             .ToListAsync();
     }
 
-    public async Task<bool> CreateInvitation(string email, string tenantId, string roleName, string createdBy)
+    public async Task<bool> CreateInvitation(string email, Guid tenantId, string roleName, Guid createdBy)
     {
         var invitation = new TenantInvitation
         {
@@ -179,6 +143,15 @@ public class AuthService(
 
         masterContext.TenantInvitations.Add(invitation);
         await masterContext.SaveChangesAsync();
+
+        var emailMsg = new EmailMessage
+        {
+            To = email,
+            Subject = "You've been invited!",
+            Body = $"You've been invited to join the Leave Management platform as {roleName}. Your token is: {invitation.Token}"
+        };
+        await emailQueuePublisher.PublishEmailAsync(emailMsg);
+
         return true;
     }
 
@@ -193,15 +166,7 @@ public class AuthService(
         var invitation = await GetInvitationByToken(token);
         if (invitation == null) return false;
 
-        var user = new ApplicationUser
-        {
-            UserName = invitation.Email,
-            Email = invitation.Email,
-            FirstName = firstName,
-            LastName = lastName
-        };
-
-        var result = await Register(user, password, invitation.RoleName, invitation.TenantId, "InvitationSystem");
+        var result = await Register(invitation.Email, password, firstName, lastName, invitation.RoleName, invitation.TenantId, Guid.Empty);
         if (result)
         {
             invitation.Status = InvitationStatus.Accepted;
@@ -211,9 +176,9 @@ public class AuthService(
         return result;
     }
 
-    public async Task<bool> SoftDeleteUser(string userId)
+    public async Task<bool> SoftDeleteUser(Guid userId)
     {
-        var user = await userManager.FindByIdAsync(userId);
+        var user = await userManager.FindByIdAsync(userId.ToString());
         if (user == null) return false;
 
         user.IsDeleted = true;
@@ -222,7 +187,7 @@ public class AuthService(
         return result.Succeeded;
     }
 
-    public async Task<bool> SoftDeleteRole(string roleName, string? tenantId, string changedBy)
+    public async Task<bool> SoftDeleteRole(string roleName, Guid? tenantId, Guid changedBy)
     {
         var role = await roleManager.Roles.FirstOrDefaultAsync(r => r.Name == roleName && r.TenantId == tenantId);
         if (role == null) return false;
@@ -233,25 +198,12 @@ public class AuthService(
         role.UpdatedAt = DateTime.UtcNow;
 
         var result = await roleManager.UpdateAsync(role);
-        if (result.Succeeded && !string.IsNullOrEmpty(tenantId))
-        {
-            tenantContext.RoleHistories.Add(new RoleHistory
-            {
-                Action = "DeletedRole",
-                EntityId = role.Id,
-                EntityName = roleName,
-                ChangedBy = changedBy,
-                Details = $"Soft deleted role {roleName}"
-            });
-            await tenantContext.SaveChangesAsync();
-        }
-
         return result.Succeeded;
     }
 
-    public async Task<bool> ToggleUserActive(string userId)
+    public async Task<bool> ToggleUserActive(Guid userId)
     {
-        var user = await userManager.FindByIdAsync(userId);
+        var user = await userManager.FindByIdAsync(userId.ToString());
         if (user == null) return false;
 
         user.IsActive = !user.IsActive;
@@ -259,7 +211,7 @@ public class AuthService(
         return result.Succeeded;
     }
 
-    public async Task<bool> AssignRoleToUserAsync(string userId, string roleName, string? tenantId, string changedBy)
+    public async Task<bool> AssignRoleToUserAsync(Guid userId, string roleName, Guid? tenantId, Guid changedBy)
     {
         var role = await roleManager.Roles.FirstOrDefaultAsync(r => r.Name == roleName && r.TenantId == tenantId);
         if (role == null)
@@ -298,23 +250,12 @@ public class AuthService(
 
         await masterContext.SaveChangesAsync();
 
-        if (!string.IsNullOrEmpty(tenantId))
-        {
-            tenantContext.RoleHistories.Add(new RoleHistory
-            {
-                Action = "Assigned",
-                EntityId = userId,
-                EntityName = roleName,
-                ChangedBy = changedBy,
-                Details = $"Assigned role {roleName} to user {userId}"
-            });
-            await tenantContext.SaveChangesAsync();
-        }
+
 
         return true;
     }
 
-    public async Task<bool> CreateRole(string roleName, string? tenantId, string changedBy)
+    public async Task<bool> CreateRole(string roleName, Guid? tenantId, Guid changedBy)
     {
         if (await roleManager.Roles.AnyAsync(r => r.Name == roleName && r.TenantId == tenantId)) return false;
 
@@ -325,23 +266,12 @@ public class AuthService(
         };
 
         var result = await roleManager.CreateAsync(role);
-        if (result.Succeeded && !string.IsNullOrEmpty(tenantId))
-        {
-            tenantContext.RoleHistories.Add(new RoleHistory
-            {
-                Action = "Created",
-                EntityId = role.Id,
-                EntityName = roleName,
-                ChangedBy = changedBy,
-                Details = $"Created role {roleName}"
-            });
-            await tenantContext.SaveChangesAsync();
-        }
+
 
         return result.Succeeded;
     }
 
-    public async Task<IEnumerable<string>> GetRolesByTenant(string? tenantId)
+    public async Task<IEnumerable<string>> GetRolesByTenant(Guid? tenantId)
     {
         return await roleManager.Roles
             .Where(r => r.TenantId == tenantId || r.TenantId == null)
@@ -349,12 +279,51 @@ public class AuthService(
             .ToListAsync();
     }
 
-    private async Task<string> GenerateToken(ApplicationUser user, string? tenantId)
+    public async Task<AuthResponse?> Refresh(string refreshToken)
+    {
+        var tokenHandler = new JwtSecurityTokenHandler();
+        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(configuration["JwtSettings:RefreshKey"] ?? (configuration["JwtSettings:Key"] + "RefreshSecret")));
+
+        try
+        {
+            var principal = tokenHandler.ValidateToken(refreshToken, new TokenValidationParameters
+            {
+                ValidateIssuer = true,
+                ValidateAudience = true,
+                ValidateLifetime = true,
+                ValidateIssuerSigningKey = true,
+                ValidIssuer = configuration["JwtSettings:Issuer"],
+                ValidAudience = configuration["JwtSettings:Audience"],
+                IssuerSigningKey = key
+            }, out SecurityToken validatedToken);
+
+            if (validatedToken is not JwtSecurityToken jwtToken || !jwtToken.Header.Alg.Equals(SecurityAlgorithms.HmacSha256, StringComparison.InvariantCultureIgnoreCase))
+                return null;
+
+            var userType = principal.FindFirstValue("type");
+            if (userType != "refresh") return null;
+
+            var userId = principal.FindFirstValue("userId");
+
+            if (string.IsNullOrEmpty(userId)) return null;
+
+            var user = await userManager.FindByIdAsync(userId);
+            if (user == null || user.IsDeleted || !user.IsActive) return null;
+
+            return await GenerateAuthResponse(user);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task<AuthResponse> GenerateAuthResponse(ApplicationUser user)
     {
         var rolesWithPermissions = await masterContext.UserRoles
             .Where(ur => ur.UserId == user.Id && !ur.IsDeleted)
-            .Where(ur => string.IsNullOrEmpty(tenantId) ? ur.TenantId == null : (ur.TenantId == tenantId || ur.TenantId == null))
             .Join(masterContext.Roles, ur => ur.RoleId, r => r.Id, (ur, r) => new { r.Id, r.Name })
+            .Distinct()
             .ToListAsync();
 
         var permissions = await masterContext.RoleClaims
@@ -367,30 +336,60 @@ public class AuthService(
         {
             new Claim(ClaimTypes.Email, user.Email!),
             new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
-            new Claim("uid", user.Id),
-            new Claim("tenant_id", tenantId ?? string.Empty)
+            new Claim("userId", user.Id.ToString())
         };
 
         foreach (var r in rolesWithPermissions)
-        {
             authClaims.Add(new Claim(ClaimTypes.Role, r.Name!));
-        }
 
         foreach (var p in permissions)
-        {
             authClaims.Add(new Claim("Permission", p));
-        }
 
         var authSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(configuration["JwtSettings:Key"] ?? "DefaultSecretKeyPlaceholderLongEnough"));
 
         var token = new JwtSecurityToken(
             issuer: configuration["JwtSettings:Issuer"],
             audience: configuration["JwtSettings:Audience"],
-            expires: DateTime.Now.AddHours(3),
+            expires: DateTime.UtcNow.AddHours(1),
             claims: authClaims,
             signingCredentials: new SigningCredentials(authSigningKey, SecurityAlgorithms.HmacSha256)
         );
 
-        return new JwtSecurityTokenHandler().WriteToken(token);
+        var accessToken = new JwtSecurityTokenHandler().WriteToken(token);
+
+        var refreshTokenExpiry = DateTime.UtcNow.AddDays(7);
+        var refreshClaims = new List<Claim>
+        {
+            new Claim("userId", user.Id.ToString()),
+            new Claim("type", "refresh")
+        };
+
+        var refreshKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(configuration["JwtSettings:RefreshKey"] ?? (configuration["JwtSettings:Key"] + "RefreshSecret")));
+        var refreshTokenObj = new JwtSecurityToken(
+            issuer: configuration["JwtSettings:Issuer"],
+            audience: configuration["JwtSettings:Audience"],
+            expires: refreshTokenExpiry,
+            claims: refreshClaims,
+            signingCredentials: new SigningCredentials(refreshKey, SecurityAlgorithms.HmacSha256)
+        );
+
+        var refreshToken = new JwtSecurityTokenHandler().WriteToken(refreshTokenObj);
+
+        return new AuthResponse(accessToken, refreshToken, refreshTokenExpiry);
+    }
+
+    public async Task<List<Guid>> GetUserTenantIds(Guid userId)
+    {
+        return await masterContext.UserRoles
+            .Where(ur => ur.UserId == userId && !ur.IsDeleted && ur.TenantId != null)
+            .Select(ur => ur.TenantId!.Value)
+            .Distinct()
+            .ToListAsync();
+    }
+
+    public async Task<bool> IsUserInTenant(Guid userId, Guid tenantId)
+    {
+        return await masterContext.UserRoles
+            .AnyAsync(ur => ur.UserId == userId && ur.TenantId == tenantId && !ur.IsDeleted);
     }
 }
